@@ -1,0 +1,14 @@
+[project]
+name = "cose457-assignment"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "faiss-cpu>=1.12.0",
+    "langchain>=1.0.5",
+    "langchain-community>=0.4.1",
+    "langchain-openai>=1.0.2",
+    "pypdf>=6.2.0",
+    "python-dotenv>=1.2.1",
+]
