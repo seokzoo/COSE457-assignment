@@ -29,29 +29,44 @@ def get_llm():
         streaming=True,
     )
 
-
-@lru_cache(maxsize=4) # PDF 경로별로 캐시
-def get_retriever_from_pdf(pdf_path: str):
-    """PDF 파일로부터 Knowledge Base Retriever 초기화"""
-    if not pdf_path or not os.path.exists(pdf_path):
-        print(f"❌ PDF 파일을 찾을 수 없습니다: {pdf_path}")
-        # Gradio 인터페이스에서는 오류를 raise하는 것이 좋음
-        raise gr.Error(f"PDF 파일을 찾을 수 없습니다: {pdf_path}")
+def get_retriever_from_pdf(pdf_paths_str: str):
+    """쉼표로 구분된 PDF 파일 경로들로부터 Knowledge Base Retriever 초기화"""
+    # 쉼표로 구분된 문자열을 파일 경로 목록으로 변환하고, 공백 제거
+    pdf_paths = [p.strip() for p in pdf_paths_str.split(',') if p.strip()]
     
+    if not pdf_paths:
+        raise gr.Error("Knowledge Base에 사용할 PDF 파일 경로를 하나 이상 입력해야 합니다.")
+
+    all_docs = []
+    
+    # 1. 문서 로드 (여러 파일 처리)
+    for pdf_path in pdf_paths:
+        if not os.path.exists(pdf_path):
+            print(f"❌ PDF 파일을 찾을 수 없습니다: {pdf_path}")
+            continue 
+            
+        try:
+            print(f"📚 PDF 문서를 로드합니다: {pdf_path}")
+            loader = PyPDFLoader(pdf_path)
+            docs = loader.load()
+            if docs:
+                all_docs.extend(docs)
+            else:
+                print(f"⚠️ {pdf_path}에서 로드된 문서가 없습니다.")
+        except Exception as e:
+            print(f"❌ {pdf_path} 로드 실패: {e}")
+            continue
+
+    if not all_docs:
+        raise gr.Error("유효한 PDF 파일에서 문서를 로드하지 못했습니다. 파일 경로를 확인하세요.")
+
     try:
-        print(f"📚 PDF 문서를 로드합니다: {pdf_path}")
-        # 1. 문서 로드
-        loader = PyPDFLoader(pdf_path)
-        docs = loader.load()
-        if not docs:
-            raise gr.Error(f"PDF에서 문서를 로드하지 못했습니다: {pdf_path}")
-
-        # 2. 문서 분할
+        # 2. 문서 분할 (통합된 문서 목록 사용)
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-        splits = text_splitter.split_documents(docs)
+        splits = text_splitter.split_documents(all_docs)
 
-        # 3. 임베딩 및 벡터 스토어 생성
-        print("🧠 문서를 임베딩하고 벡터 스토어를 생성합니다... (FAISS)")
+        # 3. 임베딩 및 벡터 스토어 생성 (하나의 통합된 Vector Store)
+        print(f"🧠 {len(splits)}개 분할된 문서를 임베딩하고 벡터 스토어를 생성합니다... (FAISS)")
         embeddings = OpenAIEmbeddings()
         vector_store = FAISS.from_documents(splits, embeddings)
 
@@ -63,25 +78,29 @@ def get_retriever_from_pdf(pdf_path: str):
         print(f"❌ Retriever 초기화 실패: {e}")
         raise gr.Error(f"Retriever 초기화 실패: {str(e)}")
 
-
 def format_docs(docs):
     """검색된 문서를 문자열로 변환 (LangChain Document 객체용)"""
     if not docs:
         print("⚠️ 검색된 문서 없음")
         return "관련 문서를 찾을 수 없습니다."
 
-    formatted = [
-        doc.page_content for doc in docs if hasattr(doc, "page_content") and doc.page_content
-    ]
+    formatted_parts = []
 
-    result = (
-        "\n\n---\n\n".join(formatted)
-        if formatted
-        else "문서 내용을 추출할 수 없습니다."
-    )
-    print(f"✅ {len(formatted)}개 문서 포맷 완료 (총 {len(result)}자)")
+    for i, doc in enumerate(docs):
+        content = doc.page_content if hasattr(doc, "page_content") and doc.page_content else "내용 없음"
+        
+        source_path = doc.metadata.get("source", "출처 정보 없음")
+        source_name = os.path.basename(source_path)
+        
+        formatted_part = (
+            f"--- [document {i+1}] 파일명: {source_name} ---\n"
+            f"{content}"
+        )
+        formatted_parts.append(formatted_part)
+
+    result = "\n\n---\n\n".join(formatted_parts)
+    print(f"{len(formatted_parts)}개 문서 포맷 완료 (총 {len(result)}자)")
     return result
-
 
 def create_chain_with_kb(retriever, llm):
     """RAG 체인 생성 - Retriever로 문서 검색 후 LLM에 전달"""
@@ -89,7 +108,9 @@ def create_chain_with_kb(retriever, llm):
         [
             (
                 "system",
-                """다음 문맥(context)을 참고하여 질문에 답변하세요.
+                """당신은 사용자 질문에 답변하는 친절한 챗봇입니다.
+다음 문맥(context)을 참고하여 질문에 답변하세요.
+**답변 시, 참조한 내용의 파일명을 반드시 괄호 안에 명시하세요.** (예: ...입니다. (file1.pdf))
 문맥에 답이 없으면 모른다고 답하세요.
 
 Context:
@@ -203,20 +224,27 @@ def clear_chat():
     """채팅 기록을 지우는 함수"""
     return [], []
 
-def update_status_text(use_kb, pdf_path):
-    """KB 상태 표시줄 업데이트"""
+def update_status_text(use_kb, pdf_paths_str):
+    """KB 상태 표시줄 업데이트 (여러 파일 지원)"""
     if use_kb:
-        if pdf_path and os.path.exists(pdf_path):
-            return f"✅ KB 사용 중 ({os.path.basename(pdf_path)})"
-        elif pdf_path:
-            return f"⚠️ KB 사용 체크됨 (파일 경로 확인 필요)"
-        else:
-            return f"⚠️ KB 사용 체크됨 (PDF 경로 없음)"
+        pdf_paths = [p.strip() for p in pdf_paths_str.split(',') if p.strip()]
+        
+        if not pdf_paths:
+             return "⚠️ KB 사용 체크됨 (PDF 경로 없음)"
+        
+        valid_files = [p for p in pdf_paths if os.path.exists(p)]
+        invalid_files = [p for p in pdf_paths if not os.path.exists(p)]
+        
+        status = f"✅ KB 사용 중 ({len(valid_files)}개 파일)"
+        if invalid_files:
+             status += f" ⚠️ ({len(invalid_files)}개 파일 경로 오류)"
+             
+        return status
     else:
         return "ℹ️ 일반 대화 모드"
 
 # --- Gradio UI 레이아웃 ---
-
+pdfs = "jeff_bezos_1997.pdf,warren_buffett_2025.pdf"
 with gr.Blocks(theme=gr.themes.Soft()) as demo:
     gr.Markdown("# 🤖 Chatbot with PDF Knowledge Base (Gradio)")
 
@@ -226,16 +254,16 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
             gr.Markdown("## ⚙️ 설정")
             
             pdf_path_input = gr.Textbox(
-                label="PDF 파일 경로",
-                value="nov1025.pdf", # 기본값 설정
-                info="RAG에 사용할 PDF 파일의 경로를 입력하세요.",
+                label="PDF 파일 경로 (쉼표 구분)",
+                value=pdfs,
+                info="RAG에 사용할 PDF 파일의 경로들을 쉼표(,)로 구분하여 입력하세요.",
             )
             use_kb_checkbox = gr.Checkbox(
                 label="Knowledge Base 사용", 
                 value=True
             )
             status_display = gr.Markdown(
-                update_status_text(True, "nov1025.pdf") # 초기 상태
+                update_status_text(True, pdfs) # 초기 상태
             )
             
             # 설정 변경 시 상태 텍스트 업데이트
