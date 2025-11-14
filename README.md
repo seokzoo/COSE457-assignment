@@ -10,3 +10,7 @@
  - OpenAI API 활용
  - Vector store로 FAISS 사용
  - 답변 시 RAG를 활용하며 LLM의 답변에 출처 포함
+
+## 주요 기능 시연
+
+![demo](demo.gif)
